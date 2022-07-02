@@ -240,8 +240,6 @@ class KucoinRestApi(RestClient):
         self.order_count_lock: Lock = Lock()
         self.connect_time: int = 0
         self.ticks:Dict[str, TickData] = self.gateway.ws_api.ticks
-        # 合约查询状态
-        self.contract_inited = False
         self.account_date = None   #账户日期
         self.accounts_info:Dict[str,dict] = {}
         # 账户查询币种
@@ -602,7 +600,6 @@ class KucoinRestApi(RestClient):
                 if int(contract_postfix) <= int(current_postfix):
                     continue
             self.gateway.on_contract(contract)
-        self.contract_inited = True
         self.gateway.write_log(f"交易接口：{self.gateway_name}，合约信息查询成功")
     #------------------------------------------------------------------------------------------------- 
     def on_send_order(self, data: dict, request: Request) -> None:
@@ -754,6 +751,19 @@ class KucoinWebsocketApi(WebsocketClient):
         self.subscribed: Dict[str, SubscribeRequest] = {}
         #成交委托号
         self.trade_id:int = 0
+        self.ws_connected:bool = False
+        self.ping_count:int = 0
+        self.event_engine.register(EVENT_TIMER,self.send_ping)
+    #-------------------------------------------------------------------------------------------------
+    def send_ping(self, event):
+        """
+        发送ping
+        """
+        self.ping_count += 1
+        if self.ping_count < 20:
+            return
+        self.ping_count = 0
+        self.send_packet({'id': self.get_id(), 'type': 'ping'})
     #-------------------------------------------------------------------------------------------------
     def get_id(self):
         """
@@ -791,6 +801,7 @@ class KucoinWebsocketApi(WebsocketClient):
         """
         连接成功回报
         """
+        self.ws_connected = True
         self.gateway.write_log(f"交易接口：{self.gateway_name}，Websocket API连接成功")
 
         for req in list(self.subscribed.values()):
@@ -807,7 +818,7 @@ class KucoinWebsocketApi(WebsocketClient):
         """
         # 等待restapi合约查询完成后再订阅合约
         while True:
-            if not self.gateway.rest_api.contract_inited:
+            if not self.ws_connected:
                 sleep(1)
             else:
                 break
