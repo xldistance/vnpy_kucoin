@@ -810,6 +810,7 @@ class KucoinWebsocketApi(WebsocketClient):
     def on_disconnected(self) -> None:
         """
         """
+        self.ws_connected = False
         self.gateway.write_log(f"交易接口：{self.gateway_name}，Websocket 连接断开")
     #------------------------------------------------------------------------------------------------- 
     def subscribe(self, req: SubscribeRequest) -> None:
