@@ -791,7 +791,7 @@ class KucoinWebsocketApi(WebsocketClient):
         """
         连接成功回报
         """
-        #self.gateway.write_log(f"交易接口：{self.gateway_name}，Websocket API连接成功")
+        self.gateway.write_log(f"交易接口：{self.gateway_name}，Websocket API连接成功")
 
         for req in list(self.subscribed.values()):
             self.subscribe(req)
@@ -799,8 +799,7 @@ class KucoinWebsocketApi(WebsocketClient):
     def on_disconnected(self) -> None:
         """
         """
-        pass
-        #self.gateway.write_log(f"交易接口：{self.gateway_name}，Websocket 连接断开")
+        self.gateway.write_log(f"交易接口：{self.gateway_name}，Websocket 连接断开")
     #------------------------------------------------------------------------------------------------- 
     def subscribe(self, req: SubscribeRequest) -> None:
         """
