@@ -561,7 +561,7 @@ class KucoinRestApi(RestClient):
                 datetime=get_local_datetime(raw["createdAt"]),
                 gateway_name=self.gateway_name,
             )
-            self.orderid_map[raw["clientOid"]] = raw["id"]
+            self.orderid_map[order.orderid] = raw["id"]
             if raw["reduceOnly"]:
                 order.offset = Offset.CLOSE
             self.gateway.on_order(order)
