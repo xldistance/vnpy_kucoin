@@ -817,12 +817,9 @@ class KucoinWebsocketApi(WebsocketClient):
         """
         订阅行情
         """
-        # 等待restapi合约查询完成后再订阅合约
-        while True:
-            if not self.ws_connected:
-                sleep(1)
-            else:
-                break
+         # 等待ws连接成功后再订阅行情
+        while not self.ws_connected:
+            sleep(1)
         self.ticks[req.symbol] = TickData(
             symbol=req.symbol,
             name= req.symbol,
