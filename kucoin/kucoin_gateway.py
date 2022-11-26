@@ -305,10 +305,19 @@ class KucoinRestApi(RestClient):
         )
         self.init(REST_HOST, proxy_host, proxy_port,gateway_name = self.gateway_name)
         self.start()
-
-        self.gateway.write_log("REST API启动成功")
-
         self.query_contract()
+    #------------------------------------------------------------------------------------------------- 
+    def on_connected(self) -> None:
+        """
+        连接成功回报
+        """
+        self.gateway.write_log(f"交易接口：{self.gateway_name}，REST API连接成功")
+    #------------------------------------------------------------------------------------------------- 
+    def on_disconnected(self) -> None:
+        """
+        连接断开回报
+        """
+        self.gateway.write_log(f"交易接口：{self.gateway_name}，REST API连接断开")
     #-------------------------------------------------------------------------------------------------   
     def get_token(self,is_private:bool = True):
         """
