@@ -960,12 +960,13 @@ class KucoinWebsocketApi(WebsocketClient):
             datetime=get_local_datetime(data["orderTime"]),
             gateway_name=self.gateway_name,
         )
-
-        self.gateway.rest_api.orderid_map[orderid] = data["orderId"]
-        if data.get("orderType",None):
-            order.type = OrderType.LIMIT
         self.gateway.on_order(order)
-
+        # orderid_map删除非活动委托单
+        if not order.is_active():
+            self.gateway.rest_api.orderid_map.pop(orderid)
+        else:
+            self.gateway.rest_api.orderid_map[orderid] = data["orderId"]
+            
         if order.traded:
             self.trade_id += 1
             trade: TradeData = TradeData(
