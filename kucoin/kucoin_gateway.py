@@ -310,8 +310,7 @@ class KucoinRestApi(RestClient):
     #-------------------------------------------------------------------------------------------------   
     def get_token(self,is_private:bool = True):
         """
-        获取websocket令牌
-        type_: public公共，private私有
+        获取websocket私有和公共令牌
         """
         if is_private:
             data: dict = {"security": Security.SIGNED}
