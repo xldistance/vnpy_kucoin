@@ -15,7 +15,6 @@ from datetime import timezone, datetime, timedelta
 import pytz
 from typing import Any, Dict, List
 from peewee import chunked
-from uuid import uuid4
 
 from vnpy.event import Event
 from vnpy.trader.setting import kucoin_account  #导入账户字典
@@ -44,7 +43,7 @@ from vnpy.trader.object import (
     BarData
 )
 from vnpy.trader.event import EVENT_TIMER
-from vnpy.trader.utility import (delete_dr_data,remain_alpha,get_folder_path,load_json, save_json,get_local_datetime,extract_vt_symbol,TZ_INFO,remain_digit,GetFilePath)
+from vnpy.trader.utility import (delete_dr_data,remain_alpha,get_folder_path,load_json, save_json,get_local_datetime,extract_vt_symbol,TZ_INFO,remain_digit,GetFilePath,get_uuid)
 from vnpy.trader.database import database_manager
 from vnpy.api.websocket import WebsocketClient
 from vnpy.api.rest import Request, RestClient
@@ -183,7 +182,7 @@ class KucoinGateway(BaseGateway):
             symbol,exchange,gateway_name = extract_vt_symbol(self.history_contract.pop(0))
             req = HistoryRequest(
                 symbol = symbol,
-                exchange = Exchange(exchange),
+                exchange = exchange,
                 interval = Interval.MINUTE,
                 start = datetime.now(TZ_INFO) - timedelta(days = 1),
                 end = datetime.now(TZ_INFO),
@@ -246,7 +245,7 @@ class KucoinRestApi(RestClient):
         self.currencies = ["XBT","USDT"]
         # websocket令牌
         self.token = ""
-        # clientOid和orderId映射
+        # 用户自定义委托单id和系统委托单id映射
         self.orderid_map = {}
     #------------------------------------------------------------------------------------------------- 
     def sign(self, request: Request) -> Request:
@@ -314,10 +313,10 @@ class KucoinRestApi(RestClient):
         """
         if is_private:
             data: dict = {"security": Security.SIGNED}
-            path: str = f"/api/v1/bullet-private"
+            path: str = "/api/v1/bullet-private"
         else:
             data: dict = {"security": Security.NONE}
-            path: str = f"/api/v1/bullet-public"
+            path: str = "/api/v1/bullet-public"
         self.add_request(
             method="POST",
             path=path,
@@ -329,7 +328,7 @@ class KucoinRestApi(RestClient):
         """
         收到token回报
         """
-        self.token = data["data"]["token"]
+        self.token:str = data["data"]["token"]
     #------------------------------------------------------------------------------------------------- 
     def query_account(self) -> None:
         """
@@ -447,7 +446,9 @@ class KucoinRestApi(RestClient):
         if req.orderid in self.orderid_map:
             orderid = self.orderid_map[req.orderid]
         else:
-            orderid = req.orderid
+            if self.orderid_map:
+                orderid = list(self.orderid_map.values())[0]
+                self.gateway.write_log(f"合约：{req.vt_symbol}未获取到自定义orderid，使用交易所orderid:{orderid}撤单")
         path: str = "/api/v1/orders/" + orderid
         order: OrderData = self.gateway.get_order(req.orderid)
         self.add_request(
@@ -631,13 +632,15 @@ class KucoinRestApi(RestClient):
         """
         委托撤单回报
         """
-        code = request.response.json()["code"]
+        data = request.response.json()
+        code = data["code"]
         if int(code) == 100004:
+            msg = data["msg"]
             if request.extra:
                 order = request.extra
                 order.status = Status.REJECTED
                 self.gateway.on_order(order)
-            msg = f"撤单失败，状态码：{code}，信息：{request.response.text}"
+            msg = f"撤单失败，状态码：{code}，信息：{msg}"
             self.gateway.write_log(msg)
     #------------------------------------------------------------------------------------------------- 
     def on_cancel_failed(self, status_code: str, request: Request):
@@ -716,13 +719,13 @@ class KucoinRestApi(RestClient):
                 if start_time > int(datetime.timestamp(datetime.now(TZ_INFO)) * 1000):
                     break
         if not history:
-            msg = f"未获取到标的：{req.vt_symbol}历史数据"
+            msg = f"未获取到合约：{req.vt_symbol}历史数据"
             self.gateway.write_log(msg)
             return
             
         for bar_data in chunked(history, 10000):               #分批保存数据
             try:
-                database_manager.save_bar_data(bar_data,True)      #保存数据到数据库  
+                database_manager.save_bar_data(bar_data,False)      #保存数据到数据库  
             except Exception as err:
                 self.gateway.write_log(f"{err}")
                 return    
@@ -760,19 +763,12 @@ class KucoinWebsocketApi(WebsocketClient):
         if self.ping_count < 20:
             return
         self.ping_count = 0
-        self.send_packet({'id': self.get_id(), 'type': 'ping'})
-    #-------------------------------------------------------------------------------------------------
-    def get_id(self):
-        """
-        获取唯一id
-        """
-        id_ = str(uuid4()).replace('-', '')
-        return id_
+        self.send_packet({'id': get_uuid(), 'type': 'ping'})
     #-------------------------------------------------------------------------------------------------
     def connect(
         self,
         api_key: str,
-        api_secret_key: str,
+        api_secret: str,
         proxy_host: str,
         proxy_port: int,
         passphrase:str
@@ -781,16 +777,15 @@ class KucoinWebsocketApi(WebsocketClient):
         连接Websocket交易频道
         """
         self.api_key = api_key
-        self.api_secret_key = api_secret_key
+        self.api_secret = api_secret
         self.passphrase = passphrase
-        while True:
+        self.token = self.gateway.rest_api.token
+        while not self.token:
             self.gateway.rest_api.get_token(True)
             self.token = self.gateway.rest_api.token
-            if not self.token:
-                sleep(1)
-            else:
-                break
-        ws_host = f"{WEBSOCKET_HOST}?token={self.token}&connectId={self.get_id()}"
+            sleep(1)
+
+        ws_host = f"{WEBSOCKET_HOST}?token={self.token}&connectId={get_uuid()}"
         self.init(ws_host, proxy_host, proxy_port,gateway_name = self.gateway_name)
         self.start()
     #------------------------------------------------------------------------------------------------- 
@@ -806,6 +801,7 @@ class KucoinWebsocketApi(WebsocketClient):
     #------------------------------------------------------------------------------------------------- 
     def on_disconnected(self) -> None:
         """
+        连接断开回报
         """
         self.ws_connected = False
         self.gateway.write_log(f"交易接口：{self.gateway_name}，Websocket 连接断开")
@@ -814,7 +810,7 @@ class KucoinWebsocketApi(WebsocketClient):
         """
         订阅行情
         """
-         # 等待ws连接成功后再订阅行情
+        # 等待ws连接成功后再订阅行情
         while not self.ws_connected:
             sleep(1)
         self.ticks[req.symbol] = TickData(
@@ -827,8 +823,8 @@ class KucoinWebsocketApi(WebsocketClient):
 
         self.subscribed[req.symbol] = req
         # 订阅公共主题
-        self.send_packet({'id': self.get_id(), 'type': 'subscribe', 'topic': f"/contractMarket/level2Depth5:{req.symbol}","response":True})
-        self.send_packet({'id': self.get_id(), 'type': 'subscribe', 'topic': f"/contractMarket/execution:{req.symbol}","response":True})
+        self.send_packet({'id': get_uuid(), 'type': 'subscribe', 'topic': f"/contractMarket/level2Depth5:{req.symbol}","response":True})
+        self.send_packet({'id': get_uuid(), 'type': 'subscribe', 'topic': f"/contractMarket/execution:{req.symbol}","response":True})
         #订阅私有主题
         self.send_packet({'type': 'subscribe', 'topic': f"/contractMarket/tradeOrders:{req.symbol}","response":True,"privateChannel":True})
         self.send_packet({'type': 'subscribe', 'topic': f"/contract/position:{req.symbol}","response":True,"privateChannel":True})
@@ -953,7 +949,6 @@ class KucoinWebsocketApi(WebsocketClient):
             exchange=Exchange.KUCOIN,
             price=price,
             volume=float(data["size"]),
-            type=OrderType.LIMIT,
             direction=DIRECTION_KUCOIN2VT[data["side"]],
             traded=trade_volume,
             status=status,
@@ -966,7 +961,6 @@ class KucoinWebsocketApi(WebsocketClient):
             self.gateway.rest_api.orderid_map.pop(orderid)
         else:
             self.gateway.rest_api.orderid_map[orderid] = data["orderId"]
-            
         if order.traded:
             self.trade_id += 1
             trade: TradeData = TradeData(
