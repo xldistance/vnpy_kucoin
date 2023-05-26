@@ -755,6 +755,12 @@ class KucoinWebsocketApi(WebsocketClient):
         self.ws_connected:bool = False
         self.ping_count:int = 0
         self.event_engine.register(EVENT_TIMER,self.send_ping)
+        self.func_map = {
+            "match":self.on_public_trade,
+            "level2":self.on_depth,
+            "symbolOrderChange":self.on_order,
+            "position.change":self.on_position
+        }
     #-------------------------------------------------------------------------------------------------
     def send_ping(self, event):
         """
@@ -844,20 +850,15 @@ class KucoinWebsocketApi(WebsocketClient):
             self.gateway.write_log(f"交易接口：{self.gateway_name}收到错误websocket数据推送，错误信息：{msg}")
             return
         channel = packet["subject"]
-        data = packet["data"]
-        if channel == "match":
-            self.on_public_trade(data)
-        elif channel == "level2":
-            self.on_depth(packet)
-        elif channel == "symbolOrderChange":
-            self.on_order(data)
-        elif channel == "position.change":
-            self.on_position(data)
+        function = self.func_map.get(channel,None)
+        if function:
+            function(packet)
     #------------------------------------------------------------------------------------------------- 
-    def on_public_trade(self,data:dict):
+    def on_public_trade(self,packet:dict):
         """
         收到公开成交事件回报
         """
+        data = packet["data"]
         symbol = data["symbol"]
         tick = self.ticks[symbol]
         tick.last_price = data["price"]
@@ -886,10 +887,11 @@ class KucoinWebsocketApi(WebsocketClient):
         if tick.last_price:
             self.gateway.on_tick(copy(tick))
     #------------------------------------------------------------------------------------------------- 
-    def on_position(self,data: dict):
+    def on_position(self,packet: dict):
         """
         收到仓位事件回报
         """
+        data = packet["data"]
         if "currentQty" not in data:
             return
         volume = float(data["currentQty"])
@@ -918,10 +920,11 @@ class KucoinWebsocketApi(WebsocketClient):
         self.gateway.on_position(position_1)
         self.gateway.on_position(position_2)
     #------------------------------------------------------------------------------------------------- 
-    def on_order(self,data: dict):
+    def on_order(self,packet: dict):
         """
         收到委托事件回报
         """
+        data = packet["data"]
         trade_volume = float(data["filledSize"])
         if data["status"] == "done":
             if float(data["size"]) == trade_volume:
