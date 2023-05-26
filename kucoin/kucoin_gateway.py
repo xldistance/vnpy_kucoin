@@ -692,9 +692,9 @@ class KucoinRestApi(RestClient):
                 break
             else:
                 data = resp.json()
-                if not data:
+                if "data" not in data:
                     delete_dr_data(req.symbol,self.gateway_name)
-                    msg = f"标的：{req.vt_symbol}获取历史数据为空，开始时间：{req.start}"
+                    msg = f"标的：{req.vt_symbol}获取历史数据为空，收到数据：{data}"
                     self.gateway.write_log(msg)
                     break
                 buf = []
@@ -718,7 +718,9 @@ class KucoinRestApi(RestClient):
                     break
                 # 更新开始时间
                 start_time = bar.datetime + timedelta(minutes=1)
-
+                # 开始时间大于等于结束时间则跳出循环，否则获取历史数据会出错
+                if start_time >= end_time:
+                    break
         if not history:
             msg = f"未获取到合约：{req.vt_symbol}历史数据"
             self.gateway.write_log(msg)
