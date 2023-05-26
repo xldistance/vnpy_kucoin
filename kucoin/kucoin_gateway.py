@@ -447,8 +447,10 @@ class KucoinRestApi(RestClient):
             orderid = self.orderid_map[req.orderid]
         else:
             if self.orderid_map:
-                orderid = list(self.orderid_map.values())[0]
-                self.gateway.write_log(f"合约：{req.vt_symbol}未获取到自定义orderid，使用交易所orderid:{orderid}撤单")
+                local_id = list(self.orderid_map)[0]
+                orderid = self.orderid_map[local_id]
+                self.orderid_map.pop(local_id)
+                self.gateway.write_log(f"合约：{req.vt_symbol}未获取到委托单id映射：自定义委托单id：{req.orderid}，使用交易所orderid：{orderid}撤单")
         path: str = "/api/v1/orders/" + orderid
         order: OrderData = self.gateway.get_order(req.orderid)
         self.add_request(
@@ -483,19 +485,20 @@ class KucoinRestApi(RestClient):
             return
         accounts_info = list(self.accounts_info.values())
         account_date = accounts_info[-1]["datetime"].date()
-        account_path = GetFilePath().ctp_account_path.replace("ctp_account_1",self.gateway.account_file_name)
+        account_path = GetFilePath.ctp_account_path.replace("ctp_account_1",self.gateway.account_file_name)
+        write_header = not Path(account_path).exists()
+        additional_writing = self.account_date and self.account_date != account_date
+        self.account_date = account_date
+        # 文件不存在则写入文件头，否则只在日期变更后追加写入文件
+        if not write_header and not additional_writing:
+            return
+        write_mode = "w" if write_header else "a"
         for account_data in accounts_info:
-            if not Path(account_path).exists(): # 如果文件不存在，需要写header
-                with open(account_path, 'w',newline="") as f1:          #newline=""不自动换行
-                    w1 = csv.DictWriter(f1, account_data.keys())
+            with open(account_path, write_mode, newline="") as f1:          
+                w1 = csv.DictWriter(f1, list(account_data))
+                if write_header:
                     w1.writeheader()
-                    w1.writerow(account_data)
-            else: # 文件存在，不需要写header
-                if self.account_date and self.account_date != account_date:        #一天写入一次账户信息         
-                    with open(account_path,'a',newline="") as f1:                               #a二进制追加形式写入
-                        w1 = csv.DictWriter(f1, account_data.keys())
-                        w1.writerow(account_data)
-        self.account_date = account_date         
+                w1.writerow(account_data)
     #------------------------------------------------------------------------------------------------- 
     def on_query_position(self, data: dict, request: Request) -> None:
         """
@@ -530,7 +533,7 @@ class KucoinRestApi(RestClient):
     #------------------------------------------------------------------------------------------------- 
     def on_query_order(self, data: dict, request: Request) -> None:
         """
-        未成交委托查询回报
+        委托查询回报
         """
         for raw in data["data"]["items"]:
             if raw["status"] == "done":
@@ -574,7 +577,7 @@ class KucoinRestApi(RestClient):
                 exchange=Exchange.KUCOIN,
                 name=raw["symbol"],
                 price_tick=raw["tickSize"],
-                size=20,
+                size=abs(raw["multiplier"]),
                 max_volume= raw["maxOrderQty"],
                 min_volume=raw["lotSize"],
                 open_commission_ratio = raw["takerFeeRate"],
@@ -660,16 +663,16 @@ class KucoinRestApi(RestClient):
         """
         history = []
         limit = 200
-        start_time = int(datetime.timestamp(req.start) * 1000)
-        end_time = int(datetime.timestamp(req.end) * 1000)
+        start_time = req.start
+        end_time = req.end
         time_consuming_start = time()
         while True:
             # 创建查询参数
             params = {
                 "symbol":req.symbol,
                 "granularity":1,
-                "from":start_time,
-                "to":end_time
+                "from":int(datetime.timestamp(start_time) * 1000),
+                "to":int(datetime.timestamp(end_time) * 1000)
             }
 
             resp = self.request(
@@ -714,10 +717,8 @@ class KucoinRestApi(RestClient):
                 if len(data["data"]) < limit:
                     break
                 # 更新开始时间
-                start_dt = bar.datetime + timedelta(minutes=1)
-                start_time = int(datetime.timestamp(start_dt) * 1000)
-                if start_time > int(datetime.timestamp(datetime.now(TZ_INFO)) * 1000):
-                    break
+                start_time = bar.datetime + timedelta(minutes=1)
+
         if not history:
             msg = f"未获取到合约：{req.vt_symbol}历史数据"
             self.gateway.write_log(msg)
@@ -845,7 +846,7 @@ class KucoinWebsocketApi(WebsocketClient):
         channel = packet["subject"]
         data = packet["data"]
         if channel == "match":
-            self.on_tick(data)
+            self.on_public_trade(data)
         elif channel == "level2":
             self.on_depth(packet)
         elif channel == "symbolOrderChange":
@@ -853,9 +854,9 @@ class KucoinWebsocketApi(WebsocketClient):
         elif channel == "position.change":
             self.on_position(data)
     #------------------------------------------------------------------------------------------------- 
-    def on_tick(self,data:dict):
+    def on_public_trade(self,data:dict):
         """
-        收到tick事件回报
+        收到公开成交事件回报
         """
         symbol = data["symbol"]
         tick = self.ticks[symbol]
@@ -957,10 +958,12 @@ class KucoinWebsocketApi(WebsocketClient):
         )
         self.gateway.on_order(order)
         # orderid_map删除非活动委托单
+        orderid_map = self.gateway.rest_api.orderid_map
         if not order.is_active():
-            self.gateway.rest_api.orderid_map.pop(orderid)
+            if orderid in orderid_map:
+                orderid_map.pop(orderid)
         else:
-            self.gateway.rest_api.orderid_map[orderid] = data["orderId"]
+            orderid_map[orderid] = data["orderId"]
         if order.traded:
             self.trade_id += 1
             trade: TradeData = TradeData(
