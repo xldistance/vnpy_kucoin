@@ -234,7 +234,7 @@ class KucoinRestApi(RestClient):
         self.key: str = ""
         self.secret: str = ""
         self.passphrase: str = ""
-        # 确保生成的orderid不发生冲突
+        # 生成委托单号加线程锁
         self.order_count: int = 0
         self.order_count_lock: Lock = Lock()
         self.connect_time: int = 0
@@ -245,8 +245,8 @@ class KucoinRestApi(RestClient):
         self.currencies = ["XBT","USDT"]
         # websocket令牌
         self.token = ""
-        # 用户自定义委托单id和系统委托单id映射
-        self.orderid_map = {}
+        # 用户自定义委托单id和交易所委托单id映射
+        self.orderid_map:Dict[str,str] = defaultdict(str)
     #------------------------------------------------------------------------------------------------- 
     def sign(self, request: Request) -> Request:
         """
@@ -266,7 +266,7 @@ class KucoinRestApi(RestClient):
         data_json = ""
         if method in ["GET", "DELETE"]:
             if params:
-                uri_path: str = request.path + "?" + urlencode(request.params)
+                uri_path: str = request.path + "?" + urlencode(params)
         else:
             if request.data:
                 data_json= json.dumps(request.data)
@@ -443,15 +443,15 @@ class KucoinRestApi(RestClient):
         必须用api生成的订单编号撤单
         """
         data: dict = {"security": Security.SIGNED}
-        if req.orderid in self.orderid_map:
-            orderid = self.orderid_map[req.orderid]
-        else:
+        gateway_id = self.orderid_map[req.orderid]
+        if not gateway_id:
             if self.orderid_map:
                 local_id = list(self.orderid_map)[0]
-                orderid = self.orderid_map[local_id]
+                gateway_id = self.orderid_map[local_id]
                 self.orderid_map.pop(local_id)
-                self.gateway.write_log(f"合约：{req.vt_symbol}未获取到委托单id映射：自定义委托单id：{req.orderid}，使用交易所orderid：{orderid}撤单")
-        path: str = "/api/v1/orders/" + orderid
+                self.gateway.write_log(f"合约：{req.vt_symbol}未获取到委托单id映射：自定义委托单id：{req.orderid}，使用交易所orderid：{gateway_id}撤单")
+
+        path: str = "/api/v1/orders/" + gateway_id
         order: OrderData = self.gateway.get_order(req.orderid)
         self.add_request(
             method="DELETE",
@@ -788,13 +788,13 @@ class KucoinWebsocketApi(WebsocketClient):
         self.api_key = api_key
         self.api_secret = api_secret
         self.passphrase = passphrase
-        self.token = self.gateway.rest_api.token
-        while not self.token:
+        token = self.gateway.rest_api.token
+        while not token:
             self.gateway.rest_api.get_token(True)
-            self.token = self.gateway.rest_api.token
+            token = self.gateway.rest_api.token
             sleep(1)
 
-        ws_host = f"{WEBSOCKET_HOST}?token={self.token}&connectId={get_uuid()}"
+        ws_host = f"{WEBSOCKET_HOST}?token={token}&connectId={get_uuid()}"
         self.init(ws_host, proxy_host, proxy_port,gateway_name = self.gateway_name)
         self.start()
     #------------------------------------------------------------------------------------------------- 
@@ -927,18 +927,19 @@ class KucoinWebsocketApi(WebsocketClient):
         收到委托事件回报
         """
         data = packet["data"]
+        volume = float(data["size"])
         trade_volume = float(data["filledSize"])
         if data["status"] == "done":
-            if float(data["size"]) == trade_volume:
+            if volume == trade_volume:
                 status = Status.ALLTRADED
             if float(data["canceledSize"]):
                 status = Status.CANCELLED
         elif data["status"] == "open":
             status = Status.NOTTRADED
         elif data["status"] == "match":
-            if float(data["size"]) == trade_volume:
+            if volume == trade_volume:
                 status = Status.ALLTRADED
-            elif float(data["size"]) > trade_volume:
+            elif volume > trade_volume:
                 status = Status.PARTTRADED
 
         if "clientOid" in data:
