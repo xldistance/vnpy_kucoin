@@ -14,7 +14,6 @@ from time import sleep, time
 from typing import Any, Dict, List
 from urllib.parse import urlencode
 
-import pytz
 from peewee import chunked
 from vnpy.api.rest import Request, RestClient
 from vnpy.api.websocket import WebsocketClient
@@ -45,7 +44,7 @@ from vnpy.trader.utility import (
     GetFilePath,
     delete_dr_data,
     extract_vt_symbol,
-    get_folder_path,
+    get_symbol_mark,
     get_local_datetime,
     get_uuid,
     is_target_contract,
@@ -62,7 +61,7 @@ recording_list = GetFilePath.recording_list
 REST_HOST: str = "https://api-futures.kucoin.com"
 
 # Websocket API地址
-WEBSOCKET_HOST: str = "wss://ws-api.kucoin.com/endpoint"
+WEBSOCKET_HOST: str = "wss://ws-api-futures.kucoin.com"
 
 # 委托类型映射
 ORDERTYPE_VT2KUCOIN = {OrderType.LIMIT: "limit", OrderType.MARKET: "market"}
@@ -87,8 +86,8 @@ OPPOSITE_DIRECTION = {
 class Security(Enum):
     NONE: int = 0
     SIGNED: int = 1
-
-
+# 合约数据缓存
+CONTRACT_DATA = {}
 # ----------------------------------------------------------------------------------------------------
 class KucoinGateway(BaseGateway):
     """vn.py用于对接KUCOIN的交易接口"""
@@ -118,6 +117,10 @@ class KucoinGateway(BaseGateway):
         self.query_functions = [self.query_account, self.query_order, self.query_position]
         # 查询历史数据状态
         self.history_status = True
+        # 订阅逐笔成交数据状态
+        self.book_trade_status: bool = False
+        # 获取token计时器
+        self.token_count:int = 0
     # ----------------------------------------------------------------------------------------------------
     def connect(self, log_account: dict = {}) -> None:
         """
@@ -213,6 +216,12 @@ class KucoinGateway(BaseGateway):
             symbol, exchange, gateway_name = extract_vt_symbol(vt_symbol)
             self.rest_api.query_tick(symbol)
             self.query_contracts.append(vt_symbol)
+        # 1分钟获取一次令牌
+        self.token_count += 1
+        if self.token_count < 60:
+            return
+        self.token_count = 0
+        self.rest_api.get_token()
     # ----------------------------------------------------------------------------------------------------
     def init_query(self):
         """ """
@@ -287,11 +296,11 @@ class KucoinRestApi(RestClient):
         str_to_sign = str(nonce) + method + uri_path
         sign = self.generate_signature(str_to_sign)
         passphrase = self.generate_signature(self.passphrase)
-        if request.headers is None:
+        if not request.headers:
             request.headers = {"Content-Type": "application/json"}
 
         request.headers.update(
-            {"KC-API-KEY": self.key, "KC-API-SIGN": sign, "KC-API-TIMESTAMP": str(nonce), "KC-API-PASSPHRASE": passphrase, "KC-API-KEY-VERSION": "2"}
+            {"KC-API-KEY": self.key, "KC-API-SIGN": sign, "KC-API-TIMESTAMP": str(nonce), "KC-API-PASSPHRASE": passphrase, "KC-API-KEY-VERSION": "3"}
         )
         return request
     # ----------------------------------------------------------------------------------------------------
@@ -320,7 +329,9 @@ class KucoinRestApi(RestClient):
     # ----------------------------------------------------------------------------------------------------
     def get_token(self, is_private: bool = True):
         """
-        获取websocket私有和公共令牌
+        * 获取websocket私有和公共令牌。
+        * 参数:
+            is_private (bool): 是否需要获取私有令牌（默认为True）
         """
         if is_private:
             data: dict = {"security": Security.SIGNED}
@@ -345,12 +356,10 @@ class KucoinRestApi(RestClient):
         """
         查询资金
         """
-        data: dict = {"security": Security.SIGNED}
         path: str = "/api/v1/account-overview"
-        currency = self.currencies.pop(0)
-        params = {"currency": currency}
-        self.add_request(method="GET", path=path, callback=self.on_query_account, data=data, params=params)
-        self.currencies.append(currency)
+        for currency in self.currencies:
+            params = {"currency": currency}
+            self.add_request(method="GET", path=path, callback=self.on_query_account, data={"security": Security.SIGNED}, params=params)
     # ----------------------------------------------------------------------------------------------------
     def query_position(self) -> None:
         """
@@ -599,7 +608,7 @@ class KucoinRestApi(RestClient):
                 exchange=Exchange.KUCOIN,
                 name=raw["symbol"],
                 price_tick=raw["tickSize"],
-                size=abs(raw["multiplier"]),
+                size=raw["multiplier"],
                 max_volume=raw["maxOrderQty"],
                 min_volume=raw["lotSize"],
                 open_commission_ratio=raw["takerFeeRate"],
@@ -613,6 +622,9 @@ class KucoinRestApi(RestClient):
                 current_postfix = datetime.now().strftime("%Y%m%d")
                 if int(contract_postfix) <= int(current_postfix):
                     continue
+            if contract.symbol.endswith("USDTM"):
+                symbol_mark = get_symbol_mark(contract.vt_symbol)
+                CONTRACT_DATA[symbol_mark] = contract
             self.gateway.on_contract(contract)
         self.gateway.write_log(f"交易接口：{self.gateway_name}，合约信息查询成功")
     # ----------------------------------------------------------------------------------------------------
@@ -682,64 +694,66 @@ class KucoinRestApi(RestClient):
         limit = 200
         start_time = req.start
         time_consuming_start = time()
-        while True:
-            # 创建查询参数
+        # 已经获取了所有可用的历史数据或者start已经到了请求的终止时间则终止循环
+        # kucoin有的合约历史数据不足limit条，所以不用判断len(buf) < limit
+        while start_time < req.end:
             end_time = start_time + timedelta(minutes=limit)
-            params = {"symbol": req.symbol, "granularity": 1, "from": int(start_time.timestamp() * 1000), "to": int(end_time.timestamp() * 1000)}
-
+            params = {
+                "symbol": req.symbol,
+                "granularity": 1,
+                "from": int(start_time.timestamp() * 1000),
+                "to": int(end_time.timestamp() * 1000)
+            }
             resp = self.request("GET", "/api/v1/kline/query", data={"security": Security.NONE}, params=params)
-            # 如果请求失败则终止循环
-            if not resp:
-                msg = f"标的：{req.vt_symbol}获取历史数据失败"
+
+            if not resp or resp.status_code != 200:
+                msg = f"标的：{req.vt_symbol}获取历史数据失败，状态码：{getattr(resp, 'status_code', '无响应')}, 信息：{getattr(resp, 'text', '')}"
                 self.gateway.write_log(msg)
                 break
-            elif resp.status_code // 100 != 2:
-                msg = f"标的：{req.vt_symbol}获取历史数据失败，状态码：{resp.status_code}，信息：{resp.text}"
+
+            data = resp.json()
+            if "data" not in data:
+                delete_dr_data(req.symbol, self.gateway_name)
+                msg = f"标的：{req.vt_symbol}获取历史数据为空，收到数据：{data}"
                 self.gateway.write_log(msg)
                 break
-            else:
-                data = resp.json()
-                if "data" not in data:
-                    delete_dr_data(req.symbol, self.gateway_name)
-                    msg = f"标的：{req.vt_symbol}获取历史数据为空，收到数据：{data}"
-                    self.gateway.write_log(msg)
-                    break
-                buf = []
-                for raw_data in data["data"]:
-                    bar = BarData(
-                        symbol=req.symbol,
-                        exchange=req.exchange,
-                        datetime=get_local_datetime(raw_data[0]),
-                        interval=req.interval,
-                        volume=raw_data[5],
-                        open_price=raw_data[1],
-                        high_price=raw_data[2],
-                        low_price=raw_data[3],
-                        close_price=raw_data[4],
-                        gateway_name=self.gateway_name,
-                    )
-                    buf.append(bar)
-                history.extend(buf)
-                # 更新开始时间
-                start_time = end_time
-                # 已经获取了所有可用的历史数据或者start已经到了请求的终止时间则终止循环
-                # kucoin有的合约历史数据不足limit条，所以不用判断len(buf) < limit
-                if start_time >= req.end:
-                    break
-        if not history:
-            msg = f"未获取到合约：{req.vt_symbol}历史数据"
-            self.gateway.write_log(msg)
-            return
-        for bar_data in chunked(history, 10000):  # 分批保存数据
+
+            buf = []
+            for raw_data in data["data"]:
+                symbol_mark = get_symbol_mark(req.vt_symbol)
+                volume = raw_data[5] * CONTRACT_DATA[symbol_mark].size
+
+                bar = BarData(
+                    symbol=req.symbol,
+                    exchange=req.exchange,
+                    datetime=get_local_datetime(raw_data[0]),
+                    interval=req.interval,
+                    open_price=raw_data[1],
+                    high_price=raw_data[2],
+                    low_price=raw_data[3],
+                    close_price=raw_data[4],
+                    volume=volume,
+                    gateway_name=self.gateway_name,
+                )
+                buf.append(bar)
+
+            history.extend(buf)
+            start_time = end_time
+
+        if history:
             try:
-                database_manager.save_bar_data(bar_data, False)  # 保存数据到数据库
+                database_manager.save_bar_data(history, False)
             except Exception as err:
                 self.gateway.write_log(f"{err}")
                 return
-        time_consuming_end = time()
-        query_time = round(time_consuming_end - time_consuming_start, 3)
-        msg = f"载入{req.vt_symbol}:bar数据，开始时间：{history[0].datetime} ，结束时间： {history[-1].datetime}，数据量：{len(history)}，耗时:{query_time}秒"
-        self.gateway.write_log(msg)
+
+            time_consuming_end = time()
+            query_time = round(time_consuming_end - time_consuming_start, 3)
+            msg = f"载入{req.vt_symbol}:bar数据，开始时间：{history[0].datetime}，结束时间：{history[-1].datetime}，数据量：{len(history)}，耗时:{query_time}秒"
+            self.gateway.write_log(msg)
+        else:
+            msg = f"未获取到合约：{req.vt_symbol}历史数据"
+            self.gateway.write_log(msg)
 # ----------------------------------------------------------------------------------------------------
 class KucoinWebsocketApi(WebsocketClient):
     """
@@ -760,7 +774,7 @@ class KucoinWebsocketApi(WebsocketClient):
         self.trade_id: int = 0
         self.ws_connected: bool = False
         self.ping_count: int = 0
-        self.event_engine.register(EVENT_TIMER, self.send_ping)
+        self.gateway.event_engine.register(EVENT_TIMER, self.send_ping)
         self.func_map = {
             "tickerV2":self.on_bbo,
             "match": self.on_public_trade,
@@ -774,7 +788,7 @@ class KucoinWebsocketApi(WebsocketClient):
         发送ping
         """
         self.ping_count += 1
-        if self.ping_count < 20:
+        if self.ping_count < 10:
             return
         self.ping_count = 0
         self.send_packet({"id": get_uuid(), "type": "ping"})
@@ -829,11 +843,13 @@ class KucoinWebsocketApi(WebsocketClient):
         )
 
         self.subscribed[req.symbol] = req
-        # 订阅公共主题
-        # 逐笔一档深度占用大量带宽，暂时不用
-        #self.send_packet({"id": get_uuid(), "type": "subscribe", "topic": f"/contractMarket/tickerV2:{req.symbol}", "response": True})
+        # 订阅5档深度
         self.send_packet({"id": get_uuid(), "type": "subscribe", "topic": f"/contractMarket/level2Depth5:{req.symbol}", "response": True})
+        # 订阅逐笔成交
         self.send_packet({"id": get_uuid(), "type": "subscribe", "topic": f"/contractMarket/execution:{req.symbol}", "response": True})
+        if self.gateway.book_trade_status:
+            # 逐笔一档深度占用大量带宽，暂时不用
+            self.send_packet({"id": get_uuid(), "type": "subscribe", "topic": f"/contractMarket/tickerV2:{req.symbol}", "response": True})
         # 订阅私有主题
         self.send_packet({"type": "subscribe", "topic": f"/contractMarket/tradeOrders:{req.symbol}", "response": True, "privateChannel": True})
         self.send_packet({"type": "subscribe", "topic": f"/contract/position:{req.symbol}", "response": True, "privateChannel": True})
@@ -851,8 +867,8 @@ class KucoinWebsocketApi(WebsocketClient):
             msg = packet["data"]
             # token过期重启交易接口
             if msg == "token is expired":
-                save_connection_status(self.gateway_name, False, msg)
-            self.gateway.write_log(f"交易接口：{self.gateway_name}收到错误websocket数据推送，错误信息：{msg}")
+                save_connection_status(self.gateway_name, False)
+            self.gateway.write_log(f"交易接口：{self.gateway_name}WEBSOCKET API收到错误信息：{msg}")
             return
         # 事件类型
         channel = packet["subject"]
@@ -882,7 +898,6 @@ class KucoinWebsocketApi(WebsocketClient):
         tick = self.ticks[symbol]
         tick.last_price = float(data["price"])
         tick.datetime = get_local_datetime(data["ts"])
-        self.gateway.on_tick(copy(tick))
     # ----------------------------------------------------------------------------------------------------
     def on_depth(self, packet: dict):
         """
@@ -902,6 +917,8 @@ class KucoinWebsocketApi(WebsocketClient):
         # 更新买单和卖单的order book
         update_order_book(data["bids"], "bid")
         update_order_book(data["asks"], "ask")
+        if tick.last_price:
+            self.gateway.on_tick(copy(tick))
     # ----------------------------------------------------------------------------------------------------
     def on_position(self, packet: dict):
         """
