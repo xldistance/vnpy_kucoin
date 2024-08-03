@@ -197,7 +197,7 @@ class KucoinGateway(BaseGateway):
                 symbol=symbol,
                 exchange=exchange,
                 interval=Interval.MINUTE,
-                start=datetime.now(TZ_INFO) - timedelta(minutes=1440),
+                start=datetime.now(TZ_INFO) - timedelta(minutes=1400),
                 end=datetime.now(TZ_INFO),
                 gateway_name=self.gateway_name,
             )
@@ -222,6 +222,9 @@ class KucoinGateway(BaseGateway):
             return
         self.token_count = 0
         self.rest_api.get_token()
+        # rest api令牌更新后websocket api重新赋值host
+        ws_host = f"{WEBSOCKET_HOST}?token={self.rest_api.token}&connectId={get_uuid()}"
+        self.ws_api.host = ws_host
     # ----------------------------------------------------------------------------------------------------
     def init_query(self):
         """ """
@@ -265,7 +268,7 @@ class KucoinRestApi(RestClient):
         self.accounts_info: Dict[str, dict] = {}
         # 账户查询币种
         self.currencies = ["XBT", "USDT"]
-        # websocket令牌
+        # rest api令牌用于websocket api连接令牌
         self.token = ""
         # 用户自定义委托单id和交易所委托单id映射
         self.orderid_map: Dict[str, str] = defaultdict(str)
