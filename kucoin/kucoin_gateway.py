@@ -197,7 +197,7 @@ class KucoinGateway(BaseGateway):
                 symbol=symbol,
                 exchange=exchange,
                 interval=Interval.MINUTE,
-                start=datetime.now(TZ_INFO) - timedelta(minutes=1400),
+                start=datetime.now(TZ_INFO) - timedelta(minutes=1440),
                 end=datetime.now(TZ_INFO),
                 gateway_name=self.gateway_name,
             )
