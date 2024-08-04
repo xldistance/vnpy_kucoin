@@ -119,8 +119,6 @@ class KucoinGateway(BaseGateway):
         self.history_status = True
         # 订阅逐笔成交数据状态
         self.book_trade_status: bool = False
-        # 获取token计时器
-        self.token_count:int = 0
     # ----------------------------------------------------------------------------------------------------
     def connect(self, log_account: dict = {}) -> None:
         """
@@ -216,15 +214,6 @@ class KucoinGateway(BaseGateway):
             symbol, exchange, gateway_name = extract_vt_symbol(vt_symbol)
             self.rest_api.query_tick(symbol)
             self.query_contracts.append(vt_symbol)
-        # 1分钟获取一次令牌
-        self.token_count += 1
-        if self.token_count < 60:
-            return
-        self.token_count = 0
-        self.rest_api.get_token()
-        # rest api令牌更新后websocket api重新赋值host
-        ws_host = f"{WEBSOCKET_HOST}?token={self.rest_api.token}&connectId={get_uuid()}"
-        self.ws_api.host = ws_host
     # ----------------------------------------------------------------------------------------------------
     def init_query(self):
         """ """
@@ -360,6 +349,12 @@ class KucoinRestApi(RestClient):
         查询资金
         """
         path: str = "/api/v1/account-overview"
+        """
+        currency = self.currencies.pop(0)
+        params = {"currency": currency}
+        self.add_request(method="GET", path=path, callback=self.on_query_account, data=data, params=params)
+        self.currencies.append(currency)
+        """
         for currency in self.currencies:
             params = {"currency": currency}
             self.add_request(method="GET", path=path, callback=self.on_query_account, data={"security": Security.SIGNED}, params=params)
@@ -829,6 +824,15 @@ class KucoinWebsocketApi(WebsocketClient):
         """
         self.ws_connected = False
         self.gateway.write_log(f"交易接口：{self.gateway_name}，Websocket API连接断开")
+        # websocket api断开连接后重新获取令牌，赋值host
+        token = self.gateway.rest_api.token
+        token = ""
+        while not token:
+            self.gateway.rest_api.get_token()
+            token = self.gateway.rest_api.token
+            sleep(1)
+        ws_host = f"{WEBSOCKET_HOST}?token={token}&connectId={get_uuid()}"
+        self.host = ws_host
     # ----------------------------------------------------------------------------------------------------
     def subscribe(self, req: SubscribeRequest) -> None:
         """
