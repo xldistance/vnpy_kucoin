@@ -791,13 +791,10 @@ class KucoinWebsocketApi(WebsocketClient):
         self.ping_count = 0
         self.send_packet({"id": get_uuid(), "type": "ping"})
     # ----------------------------------------------------------------------------------------------------
-    def connect(self, api_key: str, api_secret: str, proxy_host: str, proxy_port: int, passphrase: str) -> None:
+    def get_ws_host(self):
         """
-        连接Websocket交易频道
+        生成WEBSOCKET API连接地址
         """
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.passphrase = passphrase
         token = self.gateway.rest_api.token
         while not token:
             self.gateway.rest_api.get_token(True)
@@ -805,6 +802,17 @@ class KucoinWebsocketApi(WebsocketClient):
             sleep(1)
 
         ws_host = f"{WEBSOCKET_HOST}?token={token}&connectId={get_uuid()}"
+        return ws_host
+    # ----------------------------------------------------------------------------------------------------
+    def connect(self, api_key: str, api_secret: str, proxy_host: str, proxy_port: int, passphrase: str) -> None:
+        """
+        连接Websocket交易频道
+        """
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.passphrase = passphrase
+
+        ws_host = self.get_ws_host()
         self.init(ws_host, proxy_host, proxy_port, gateway_name=self.gateway_name)
         self.start()
     # ----------------------------------------------------------------------------------------------------
@@ -824,15 +832,7 @@ class KucoinWebsocketApi(WebsocketClient):
         """
         self.ws_connected = False
         self.gateway.write_log(f"交易接口：{self.gateway_name}，Websocket API连接断开")
-        # websocket api断开连接后重新获取令牌，赋值host
-        token = self.gateway.rest_api.token
-        token = ""
-        while not token:
-            self.gateway.rest_api.get_token()
-            token = self.gateway.rest_api.token
-            sleep(1)
-        ws_host = f"{WEBSOCKET_HOST}?token={token}&connectId={get_uuid()}"
-        self.host = ws_host
+        self.host = self.get_ws_host()
     # ----------------------------------------------------------------------------------------------------
     def subscribe(self, req: SubscribeRequest) -> None:
         """
@@ -850,16 +850,29 @@ class KucoinWebsocketApi(WebsocketClient):
         )
 
         self.subscribed[req.symbol] = req
-        # 订阅5档深度
-        self.send_packet({"id": get_uuid(), "type": "subscribe", "topic": f"/contractMarket/level2Depth5:{req.symbol}", "response": True})
-        # 订阅逐笔成交
-        self.send_packet({"id": get_uuid(), "type": "subscribe", "topic": f"/contractMarket/execution:{req.symbol}", "response": True})
+        self.subscribe_topics(req)
+    # ----------------------------------------------------------------------------------------------------    
+    def subscribe_topics(self, req:SubscribeRequest):
+        """
+        订阅公共和私有主题
+        """
+        topics = [
+            f"/contractMarket/level2Depth5:{req.symbol}",  # 订阅5档深度
+            f"/contractMarket/execution:{req.symbol}",       # 订阅逐笔成交
+        ]
         if self.gateway.book_trade_status:
-            # 逐笔一档深度占用大量带宽，暂时不用
-            self.send_packet({"id": get_uuid(), "type": "subscribe", "topic": f"/contractMarket/tickerV2:{req.symbol}", "response": True})
-        # 订阅私有主题
-        self.send_packet({"type": "subscribe", "topic": f"/contractMarket/tradeOrders:{req.symbol}", "response": True, "privateChannel": True})
-        self.send_packet({"type": "subscribe", "topic": f"/contract/position:{req.symbol}", "response": True, "privateChannel": True})
+            topics.append(f"/contractMarket/tickerV2:{req.symbol}")  # 逐笔一档深度(占用大量带宽)
+
+        private_topics = [
+            f"/contractMarket/tradeOrders:{req.symbol}",      # 私有主题：交易订单
+            f"/contract/position:{req.symbol}"                # 私有主题：持仓信息
+        ]
+
+        for topic in topics:
+            self.send_packet({"id": get_uuid(), "type": "subscribe", "topic": topic, "response": True})
+
+        for topic in private_topics:
+            self.send_packet({"type": "subscribe", "topic": topic, "response": True, "privateChannel": True})
     # ----------------------------------------------------------------------------------------------------
     def on_packet(self, packet: Any) -> None:
         """
