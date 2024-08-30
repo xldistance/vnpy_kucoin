@@ -168,7 +168,7 @@ class KucoinGateway(BaseGateway):
     # ----------------------------------------------------------------------------------------------------
     def query_order(self) -> None:
         """
-        查询未成交委托
+        查询活动委托单
         """
         self.rest_api.query_order()
     # ----------------------------------------------------------------------------------------------------
@@ -313,7 +313,7 @@ class KucoinRestApi(RestClient):
         self.key = key
         self.secret = secret.encode()
         self.passphrase = passphrase
-        self.connect_time = int(datetime.now().strftime("%y%m%d%H%M%S"))
+        self.connect_time = int(datetime.now().strftime("%Y%m%d%H%M%S"))
         self.init(REST_HOST, proxy_host, proxy_port, gateway_name=self.gateway_name)
         self.start()
         self.gateway.write_log(f"交易接口：{self.gateway_name}，REST API启动成功")
@@ -374,7 +374,7 @@ class KucoinRestApi(RestClient):
     # ----------------------------------------------------------------------------------------------------
     def query_order(self) -> None:
         """
-        查询未成交委托
+        查询活动委托单
         """
         data: dict = {"security": Security.SIGNED}
         params = {"status": "active"}
@@ -620,9 +620,7 @@ class KucoinRestApi(RestClient):
                 current_postfix = datetime.now().strftime("%Y%m%d")
                 if int(contract_postfix) <= int(current_postfix):
                     continue
-            if contract.symbol.endswith("USDTM"):
-                symbol_mark = get_symbol_mark(contract.vt_symbol)
-                CONTRACT_DATA[symbol_mark] = contract
+            CONTRACT_DATA[contract.symbol] = contract
             self.gateway.on_contract(contract)
         self.gateway.write_log(f"交易接口：{self.gateway_name}，合约信息查询成功")
     # ----------------------------------------------------------------------------------------------------
@@ -688,6 +686,10 @@ class KucoinRestApi(RestClient):
         """
         查询历史数据
         """
+        # 获取合约数据完成再下载历史数据
+        while not CONTRACT_DATA:
+            sleep(1)
+
         history = []
         limit = 200
         start_time = req.start
@@ -718,8 +720,7 @@ class KucoinRestApi(RestClient):
 
             buf = []
             for raw_data in data["data"]:
-                symbol_mark = get_symbol_mark(req.vt_symbol)
-                volume = raw_data[5] * CONTRACT_DATA[symbol_mark].size
+                volume = raw_data[5] * CONTRACT_DATA[req.symbol].size
 
                 bar = BarData(
                     symbol=req.symbol,
