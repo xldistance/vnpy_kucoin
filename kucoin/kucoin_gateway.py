@@ -855,6 +855,14 @@ class KucoinWebsocketApi(WebsocketClient):
 
         for req in list(self.subscribed.values()):
             self.subscribe(req)
+            
+        private_topics = [            
+            f"/contractMarket/tradeOrders",         # 私有主题：交易订单
+            f"/contract/positionAll"                        # 私有主题：持仓信息
+        ]
+
+        for topic in private_topics:
+            self.send_packet({"type": "subscribe", "topic": topic, "response": True, "privateChannel": True})
     # ----------------------------------------------------------------------------------------------------
     def on_disconnected(self) -> None:
         """
@@ -893,16 +901,8 @@ class KucoinWebsocketApi(WebsocketClient):
         if self.gateway.book_trade_status:
             topics.append(f"/contractMarket/tickerV2:{req.symbol}")  # 逐笔一档深度(占用大量带宽)
 
-        private_topics = [            
-            f"/contractMarket/tradeOrders",         # 私有主题：交易订单
-            f"/contract/positionAll"                        # 私有主题：持仓信息
-        ]
-
         for topic in topics:
             self.send_packet({"id": get_uuid(), "type": "subscribe", "topic": topic, "response": True})
-
-        for topic in private_topics:
-            self.send_packet({"type": "subscribe", "topic": topic, "response": True, "privateChannel": True})
     # ----------------------------------------------------------------------------------------------------
     def on_packet(self, packet: Any) -> None:
         """
