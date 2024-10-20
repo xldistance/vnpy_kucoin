@@ -200,6 +200,8 @@ class KucoinGateway(BaseGateway):
                 gateway_name=self.gateway_name,
             )
             self.rest_api.query_history(req)
+            self.rest_api.set_margin_mode(symbol)
+            self.rest_api.set_leverage(symbol)
     # ----------------------------------------------------------------------------------------------------
     def process_timer_event(self, event) -> None:
         """
@@ -259,8 +261,6 @@ class KucoinRestApi(RestClient):
         self.currencies = ["XBT", "USDT"]
         # rest api令牌用于websocket api连接令牌
         self.token = ""
-        # 用户自定义委托单id和交易所委托单id映射
-        self.orderid_map: Dict[str, str] = defaultdict(str)
     # ----------------------------------------------------------------------------------------------------
     def sign(self, request: Request) -> Request:
         """
@@ -397,6 +397,41 @@ class KucoinRestApi(RestClient):
 
         self.add_request(method="GET", path=path, callback=self.on_query_contract, data=data)
     # ----------------------------------------------------------------------------------------------------
+    def set_margin_mode(self,symbol:str) -> None:
+        """
+        设置全仓持仓模式
+        """
+        # 暂不支持设置USDC合约持仓模式
+        if symbol.endswith("USDCM"):
+            return
+        data: dict = {"security": Security.SIGNED,"symbol":symbol,"marginMode":"CROSS"}
+        path: str = "/api/v2/position/changeMarginMode"
+
+        self.add_request(method="POST", path=path, callback=self.on_margin_mode, data=data)
+    # ----------------------------------------------------------------------------------------------------
+    def on_margin_mode(self, data: dict, request: Request):
+        """
+        收到修改持仓模式数据回调
+        """
+        pass
+    # ----------------------------------------------------------------------------------------------------
+    def set_leverage(self, symbol: str) -> None:
+        """
+        设置合约杠杆
+        """
+        # 暂不支持修改USDC合约杠杆
+        if symbol.endswith("USDCM"):
+            return
+        data = {"security": Security.SIGNED,"symbol":symbol,"leverage":"20"}
+        path = "/api/v2/changeCrossUserLeverage"
+        self.add_request(method="POST", path=path, callback=self.on_leverage, data=data)
+    # ----------------------------------------------------------------------------------------------------
+    def on_leverage(self,data:dict,request: Request):
+        """
+        收到设置杠杆数据回调
+        """
+        pass
+    # ----------------------------------------------------------------------------------------------------
     def query_tick(self, symbol: str) -> None:
         """
         查询合约市场行情
@@ -452,6 +487,7 @@ class KucoinRestApi(RestClient):
             "type": ORDERTYPE_VT2KUCOIN[req.type],
             "clientOid": orderid,
             "leverage": str(20),
+            "marginMode":"CROSS"
         }
         if req.offset == Offset.CLOSE:
             data["reduceOnly"] = True
@@ -473,18 +509,12 @@ class KucoinRestApi(RestClient):
         委托撤单
         必须用api生成的订单编号撤单
         """
-        data: dict = {"security": Security.SIGNED}
-        gateway_id = self.orderid_map[req.orderid]
-        if not gateway_id:
-            if self.orderid_map:
-                local_id = list(self.orderid_map)[0]
-                gateway_id = self.orderid_map[local_id]
-                self.orderid_map.pop(local_id)
-                self.gateway.write_log(f"合约：{req.vt_symbol}未获取到委托单id映射：自定义委托单id：{req.orderid}，使用交易所orderid：{gateway_id}撤单")
+        data = {"security": Security.SIGNED}
+        params = {"symbol":req.symbol}
 
-        path: str = "/api/v1/orders/" + gateway_id
+        path: str = f"/api/v1/orders/client-order/{req.orderid}"
         order: OrderData = self.gateway.get_order(req.orderid)
-        self.add_request(method="DELETE", path=path, callback=self.on_cancel_order, data=data, on_failed=self.on_cancel_failed, extra=order)
+        self.add_request(method="DELETE", path=path, callback=self.on_cancel_order, data=data,params = params, on_failed=self.on_cancel_failed, extra=order)
     # ----------------------------------------------------------------------------------------------------
     def on_query_account(self, data: dict, request: Request) -> None:
         """
@@ -591,7 +621,6 @@ class KucoinRestApi(RestClient):
                 datetime=get_local_datetime(raw["createdAt"]),
                 gateway_name=self.gateway_name,
             )
-            self.orderid_map[order.orderid] = raw["id"]
             if raw["reduceOnly"]:
                 order.offset = Offset.CLOSE
             self.gateway.on_order(order)
@@ -629,7 +658,7 @@ class KucoinRestApi(RestClient):
         委托下单回报
         """
         code = int(data["code"])
-        if code // 100 != 2 :
+        if code % 100 :
             msg = data["msg"]
             order: OrderData = request.extra
             order.status = Status.REJECTED
@@ -778,7 +807,7 @@ class KucoinWebsocketApi(WebsocketClient):
             "tickerV2":self.on_bbo,
             "match": self.on_public_trade,
             "level2": self.on_depth,
-            "symbolOrderChange": self.on_order,
+            "orderChange": self.on_order,
             "position.change": self.on_position
             }
     # ----------------------------------------------------------------------------------------------------
@@ -864,9 +893,9 @@ class KucoinWebsocketApi(WebsocketClient):
         if self.gateway.book_trade_status:
             topics.append(f"/contractMarket/tickerV2:{req.symbol}")  # 逐笔一档深度(占用大量带宽)
 
-        private_topics = [
-            f"/contractMarket/tradeOrders:{req.symbol}",      # 私有主题：交易订单
-            f"/contract/position:{req.symbol}"                # 私有主题：持仓信息
+        private_topics = [            
+            f"/contractMarket/tradeOrders",         # 私有主题：交易订单
+            f"/contract/positionAll"                        # 私有主题：持仓信息
         ]
 
         for topic in topics:
@@ -985,6 +1014,7 @@ class KucoinWebsocketApi(WebsocketClient):
         data = packet["data"]
         volume = float(data["size"])
         trade_volume = float(data["filledSize"])
+        
         if data["status"] == "done":
             if volume == trade_volume:
                 status = Status.ALLTRADED
@@ -998,16 +1028,12 @@ class KucoinWebsocketApi(WebsocketClient):
             elif volume > trade_volume:
                 status = Status.PARTTRADED
 
-        if "clientOid" in data:
-            orderid = data["clientOid"]
-        else:
-            orderid = data["orderId"]
         if data["status"] == "match":
             price = float(data["matchPrice"])
         else:
             price = float(data["price"])
         order: OrderData = OrderData(
-            orderid=orderid,
+            orderid=data["clientOid"] if data["clientOid"] else data["orderId"],
             symbol=data["symbol"],
             exchange=Exchange.KUCOIN,
             price=price,
@@ -1019,13 +1045,7 @@ class KucoinWebsocketApi(WebsocketClient):
             gateway_name=self.gateway_name,
         )
         self.gateway.on_order(order)
-        # orderid_map删除非活动委托单
-        orderid_map = self.gateway.rest_api.orderid_map
-        if not order.is_active():
-            if orderid in orderid_map:
-                orderid_map.pop(orderid)
-        else:
-            orderid_map[orderid] = data["orderId"]
+
         if order.traded:
             self.trade_id += 1
             trade: TradeData = TradeData(
